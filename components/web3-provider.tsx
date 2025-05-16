@@ -13,6 +13,8 @@ type Web3ContextType = {
   disconnectWallet: () => void
   isConnecting: boolean
   error: string | null
+  subscriptionActive: boolean
+  subscribe: () => Promise<void>
 }
 
 // Create the context with default values
@@ -25,6 +27,8 @@ const Web3Context = createContext<Web3ContextType>({
   disconnectWallet: () => {},
   isConnecting: false,
   error: null,
+  subscriptionActive: false,
+  subscribe: async () => {},
 })
 
 // Hook to use the Web3 context
@@ -33,6 +37,40 @@ export const useWeb3 = () => useContext(Web3Context)
 // Base chain ID (mainnet)
 const BASE_CHAIN_ID = "0x2105"
 
+// Base Mainnet Configuration
+const BASE_MAINNET_CONFIG = {
+  chainId: BASE_CHAIN_ID,
+  chainName: "Base",
+  nativeCurrency: {
+    name: "Ethereum",
+    symbol: "ETH",
+    decimals: 18,
+  },
+  rpcUrls: ["https://mainnet.base.org"],
+  blockExplorerUrls: ["https://basescan.org"],
+}
+
+// Subscription Smart Contract Address (you'll need to deploy this)
+const SUBSCRIPTION_CONTRACT_ADDRESS = "YOUR_SUBSCRIPTION_CONTRACT_ADDRESS"
+
+// Simplified ABI for subscription contract
+const SUBSCRIPTION_ABI = [
+  {
+    inputs: [],
+    name: "subscribe",
+    outputs: [],
+    stateMutability: "payable",
+    type: "function",
+  },
+  {
+    inputs: [{ internalType: "address", name: "user", type: "address" }],
+    name: "isSubscribed",
+    outputs: [{ internalType: "bool", name: "", type: "bool" }],
+    stateMutability: "view",
+    type: "function",
+  },
+]
+
 export function Web3Provider({ children }: { children: ReactNode }) {
   const [address, setAddress] = useState<string | null>(null)
   const [isConnected, setIsConnected] = useState(false)
@@ -40,6 +78,7 @@ export function Web3Provider({ children }: { children: ReactNode }) {
   const [balance, setBalance] = useState<string | null>(null)
   const [isConnecting, setIsConnecting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [subscriptionActive, setSubscriptionActive] = useState(false)
 
   // Check if ethereum is available
   const isEthereumAvailable = () => {
@@ -50,6 +89,55 @@ export function Web3Provider({ children }: { children: ReactNode }) {
   const formatBalance = (balance: string) => {
     const balanceInEth = Number.parseInt(balance, 16) / 1e18
     return balanceInEth.toFixed(4)
+  }
+
+  // Check subscription status
+  const checkSubscription = async (userAddress: string) => {
+    if (!window.ethereum) return false
+
+    try {
+      const provider = new ethers.providers.Web3Provider(window.ethereum)
+      const contract = new ethers.Contract(
+        SUBSCRIPTION_CONTRACT_ADDRESS,
+        SUBSCRIPTION_ABI,
+        provider
+      )
+
+      const isSubscribed = await contract.isSubscribed(userAddress)
+      setSubscriptionActive(isSubscribed)
+      return isSubscribed
+    } catch (error) {
+      console.error("Error checking subscription:", error)
+      return false
+    }
+  }
+
+  // Subscribe to the service
+  const subscribe = async () => {
+    if (!window.ethereum || !address) {
+      setError("Please connect your wallet first")
+      return
+    }
+
+    try {
+      const provider = new ethers.providers.Web3Provider(window.ethereum)
+      const signer = provider.getSigner()
+      const contract = new ethers.Contract(
+        SUBSCRIPTION_CONTRACT_ADDRESS,
+        SUBSCRIPTION_ABI,
+        signer
+      )
+
+      // Subscription cost in ETH
+      const subscriptionCost = ethers.utils.parseEther("0.01")
+
+      const tx = await contract.subscribe({ value: subscriptionCost })
+      await tx.wait()
+
+      setSubscriptionActive(true)
+    } catch (error: any) {
+      setError(error.message || "Failed to subscribe")
+    }
   }
 
   // Connect wallet
@@ -81,6 +169,9 @@ export function Web3Provider({ children }: { children: ReactNode }) {
         })
         setBalance(formatBalance(balance))
 
+        // Check subscription status
+        await checkSubscription(accounts[0])
+
         // Switch to Base if not on it
         if (chainId !== BASE_CHAIN_ID) {
           try {
@@ -94,19 +185,7 @@ export function Web3Provider({ children }: { children: ReactNode }) {
               try {
                 await window.ethereum.request({
                   method: "wallet_addEthereumChain",
-                  params: [
-                    {
-                      chainId: BASE_CHAIN_ID,
-                      chainName: "Base",
-                      nativeCurrency: {
-                        name: "Ethereum",
-                        symbol: "ETH",
-                        decimals: 18,
-                      },
-                      rpcUrls: ["https://mainnet.base.org"],
-                      blockExplorerUrls: ["https://basescan.org"],
-                    },
-                  ],
+                  params: [BASE_MAINNET_CONFIG],
                 })
               } catch (addError) {
                 setError("Failed to add Base network to your wallet.")
@@ -130,6 +209,7 @@ export function Web3Provider({ children }: { children: ReactNode }) {
     setIsConnected(false)
     setChainId(null)
     setBalance(null)
+    setSubscriptionActive(false)
 
     // Clear from localStorage
     if (typeof window !== "undefined") {
@@ -142,21 +222,20 @@ export function Web3Provider({ children }: { children: ReactNode }) {
     if (!isEthereumAvailable()) return
 
     // Handle account changes
-    const handleAccountsChanged = (accounts: string[]) => {
+    const handleAccountsChanged = async (accounts: string[]) => {
       if (accounts.length === 0) {
         // User disconnected their wallet
         disconnectWallet()
       } else if (accounts[0] !== address) {
         setAddress(accounts[0])
         // Update balance for new account
-        window.ethereum
-          .request({
-            method: "eth_getBalance",
-            params: [accounts[0], "latest"],
-          })
-          .then((newBalance: string) => {
-            setBalance(formatBalance(newBalance))
-          })
+        const newBalance = await window.ethereum.request({
+          method: "eth_getBalance",
+          params: [accounts[0], "latest"],
+        })
+        setBalance(formatBalance(newBalance))
+        // Check subscription for new account
+        await checkSubscription(accounts[0])
       }
     }
 
@@ -227,6 +306,8 @@ export function Web3Provider({ children }: { children: ReactNode }) {
     disconnectWallet,
     isConnecting,
     error,
+    subscriptionActive,
+    subscribe,
   }
 
   return <Web3Context.Provider value={value}>{children}</Web3Context.Provider>
